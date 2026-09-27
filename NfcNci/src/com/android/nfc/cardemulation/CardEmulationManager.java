@@ -119,6 +119,9 @@ public class CardEmulationManager implements RegisteredServicesCache.Callback,
     static final boolean DBG = NfcProperties.debug_enabled().orElse(true);
     static final boolean VDBG = NfcProperties.verbose_debug_enabled().orElse(false);
 
+    // IchthysOS: Curve Pay as preferred wallet app (replaces Google Wallet)
+    static final String CURVE_PAY_PACKAGE = "com.imaginecurve.curve.prd";
+
     static final int NFC_HCE_APDU = 0x01;
     static final int NFC_HCE_NFCF = 0x04;
     /** Minimum AID length as per ISO7816 */
@@ -600,6 +603,8 @@ public class CardEmulationManager implements RegisteredServicesCache.Callback,
             // in that case, automatically set that app as default.
             int numPaymentServices = 0;
             ComponentName lastFoundPaymentService = null;
+            // IchthysOS: Track Curve Pay's payment service for auto-preference
+            ComponentName curvePayPaymentService = null;
             PackageManager pm;
             try {
                 pm = mContext.createPackageContextAsUser("android", /*flags=*/0,
@@ -610,10 +615,16 @@ public class CardEmulationManager implements RegisteredServicesCache.Callback,
             }
 
             for (ApduServiceInfo service : services) {
-                if (service.hasCategory(CardEmulation.CATEGORY_PAYMENT)
-                            && wasServicePreInstalled(pm, service.getComponent())) {
-                    numPaymentServices++;
-                    lastFoundPaymentService = service.getComponent();
+                if (service.hasCategory(CardEmulation.CATEGORY_PAYMENT)) {
+                    // IchthysOS: Remember Curve Pay's payment service
+                    if (CURVE_PAY_PACKAGE.equals(
+                            service.getComponent().getPackageName())) {
+                        curvePayPaymentService = service.getComponent();
+                    }
+                    if (wasServicePreInstalled(pm, service.getComponent())) {
+                        numPaymentServices++;
+                        lastFoundPaymentService = service.getComponent();
+                    }
                 }
             }
             if (numPaymentServices > 1) {
@@ -627,6 +638,13 @@ public class CardEmulationManager implements RegisteredServicesCache.Callback,
                             "verifyDefaults: No default set, " + "making single service default.");
                 }
                 setDefaultServiceForCategoryChecked(userId, lastFoundPaymentService,
+                        CardEmulation.CATEGORY_PAYMENT);
+            } else if (curvePayPaymentService != null) {
+                // IchthysOS: No pre-installed payment services, but Curve Pay is
+                // installed and has a payment service. Auto-select it as default.
+                Log.i(TAG, "verifyDefaults: No pre-installed payment service found, "
+                        + "auto-selecting Curve Pay: " + curvePayPaymentService);
+                setDefaultServiceForCategoryChecked(userId, curvePayPaymentService,
                         CardEmulation.CATEGORY_PAYMENT);
             } else {
                 // No payment services left, leave default at null
