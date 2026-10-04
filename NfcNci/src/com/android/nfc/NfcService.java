@@ -2867,6 +2867,13 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                 Log.e(TAG, "setForegroundDispatch: Caller not in foreground.");
                 return;
             }
+            // IchthysOS: apps on ichthys_nfc_blocked_pkgs get no tags; ignored like a
+            // background caller.
+            if (intent != null
+                    && IchthysNfcPolicy.isUidBlocked(mContext, Binder.getCallingUid())) {
+                Log.e(TAG, "setForegroundDispatch: Caller is blocked from NFC.");
+                return;
+            }
             // Short-cut the disable path
             if (intent == null && filters == null && techListsParcel == null) {
                 mNfcDispatcher.resetForegroundDispatch();
@@ -3017,6 +3024,11 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                             NfcService.this, callingUid)) {
                     Log.e(TAG,
                           "updateDiscoveryTechnology: Unprivileged caller shall be in foreground");
+                    return;
+                }
+                // IchthysOS: a blocked app cannot reshape polling/listening either.
+                if (IchthysNfcPolicy.isUidBlocked(mContext, callingUid)) {
+                    Log.e(TAG, "updateDiscoveryTechnology: Caller is blocked from NFC.");
                     return;
                 }
             }
@@ -3175,6 +3187,12 @@ public class NfcService implements DeviceHostListener, ForegroundUtils.Callback 
                     && !mForegroundUtils.registerUidToBackgroundCallback(
                             NfcService.this, callingUid)) {
                 Log.e(TAG, "setReaderMode: Caller is not in foreground and is not system process");
+                return;
+            }
+            // IchthysOS: a blocked app cannot enter reader mode (disabling it stays allowed).
+            if (flags != 0 && !privilegedCaller
+                    && IchthysNfcPolicy.isUidBlocked(mContext, callingUid)) {
+                Log.e(TAG, "setReaderMode: Caller is blocked from NFC.");
                 return;
             }
             boolean disablePolling = flags != 0 && getReaderModeTechMask(flags) == 0;

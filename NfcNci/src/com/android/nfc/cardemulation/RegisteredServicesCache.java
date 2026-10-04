@@ -36,6 +36,7 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageManager.ResolveInfoFlags;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
+import android.database.ContentObserver;
 import android.net.Uri;
 import android.nfc.cardemulation.AidGroup;
 import android.nfc.cardemulation.ApduServiceInfo;
@@ -45,6 +46,7 @@ import android.nfc.cardemulation.OffHostApduService;
 import android.os.ParcelFileDescriptor;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.provider.Settings;
 import android.sysprop.NfcProperties;
 import android.text.TextUtils;
 import android.util.AtomicFile;
@@ -58,6 +60,7 @@ import androidx.annotation.VisibleForTesting;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.FastXmlSerializer;
+import com.android.nfc.IchthysNfcPolicy;
 import com.android.nfc.NfcInjector;
 import com.android.nfc.NfcService;
 import com.android.nfc.R;
@@ -346,6 +349,26 @@ public class RegisteredServicesCache {
         sdFilter.addAction(Intent.ACTION_EXTERNAL_APPLICATIONS_UNAVAILABLE);
         mContext.registerReceiverForAllUsers(mReceiver.get(), sdFilter, null, null);
 
+        // IchthysOS: re-validate services when the per-app NFC block list changes.
+        mContext.getContentResolver().registerContentObserverAsUser(
+                Settings.Secure.getUriFor(IchthysNfcPolicy.BLOCKED_PACKAGES_SETTING), false,
+                new ContentObserver(null) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        if (!NfcInjector.getInstance().isBootCompleted()) {
+                            return;
+                        }
+                        synchronized (mLock) {
+                            if (mUserHandles == null) {
+                                return;
+                            }
+                            for (UserHandle uh : mUserHandles) {
+                                invalidateCache(uh.getIdentifier(), false);
+                            }
+                        }
+                    }
+                }, UserHandle.ALL);
+
         IntentFilter localeChangedFilter = new IntentFilter(Intent.ACTION_LOCALE_CHANGED);
         mContext.registerReceiverForAllUsers(new BroadcastReceiver() {
             @Override
@@ -562,6 +585,13 @@ public class RegisteredServicesCache {
                 if (!si.exported) {
                     Log.e(TAG, "getInstalledServices: Skipping application component "
                             + componentName + ": it must configured as exported");
+                    continue;
+                }
+                // IchthysOS: apps on ichthys_nfc_blocked_pkgs get no card emulation, so no AID is
+                // routed to them and they are never bound. The payment default is exempt.
+                if (IchthysNfcPolicy.isPackageBlocked(mContext, si.packageName, userId)) {
+                    Log.i(TAG, "getInstalledServices: Skipping blocked component "
+                            + componentName);
                     continue;
                 }
                 // Check if the package holds the NFC permission

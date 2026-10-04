@@ -450,6 +450,32 @@ class NfcDispatcher {
         }
 
         /**
+         * IchthysOS: after apps on ichthys_nfc_blocked_pkgs were dropped from {@code filtered},
+         * pins the launch to what is left (directly for one, through the NFC resolver for several,
+         * as {@link #checkPrefList} does), so the implicit intent cannot resolve back to a blocked
+         * app inside NfcRootActivity. Only called right before a launch, so {@link #rootIntent}
+         * is never left modified for a later dispatch stage.
+         */
+        void pinIchthysLaunch(List<ResolveInfo> filtered) {
+            if (filtered.isEmpty()) {
+                return;
+            }
+            if (filtered.size() == 1) {
+                ActivityInfo only = filtered.get(0).activityInfo;
+                Intent target = new Intent(intent);
+                target.setClassName(only.packageName, only.name);
+                rootIntent.putExtra(NfcRootActivity.EXTRA_LAUNCH_INTENT, target);
+            } else if (enableNfcMainline()) {
+                rootIntent = createNfcResolverIntent(intent, null, filtered);
+            } else {
+                rootIntent.setClass(context, TechListChooserActivity.class);
+                rootIntent.putExtra(Intent.EXTRA_INTENT, intent);
+                rootIntent.putParcelableArrayListExtra(
+                        TechListChooserActivity.EXTRA_RESOLVE_INFOS, new ArrayList<>(filtered));
+            }
+        }
+
+        /**
          * Launch the activity via a (single) NFC root task, so that it
          * creates a new task stack instead of interfering with any existing
          * task stack for that activity.
@@ -484,8 +510,18 @@ class NfcDispatcher {
                     return activity.activityInfo.exported;
                 }
             }).collect(Collectors.toList());
+            // IchthysOS: drop apps on ichthys_nfc_blocked_pkgs before the tag app preferences
+            // see them, then pin the launch to what is left.
+            int unblockedCount = activities.size();
+            activities = IchthysNfcPolicy.filterActivities(
+                    context, activities, ActivityManager.getCurrentUser());
+            boolean ichthysRemoved = activities.size() != unblockedCount;
+            int beforePrefCount = activities.size();
             if (mIsTagAppPrefSupported) {
                 activities = checkPrefList(activities, ActivityManager.getCurrentUser());
+            }
+            if (ichthysRemoved && activities.size() == beforePrefCount) {
+                pinIchthysLaunch(activities);
             }
             if (DBG) Log.d(TAG, "tryStartActivity: activities.size() = " + activities.size());
             if (activities.size() > 0) {
@@ -513,8 +549,16 @@ class NfcDispatcher {
                 activities = queryNfcIntentActivitiesAsUser(packageManager, intent, uh);
                 activities = activities.stream().filter(activity -> activity.activityInfo.exported)
                         .collect(Collectors.toList());
+                unblockedCount = activities.size();
+                activities = IchthysNfcPolicy.filterActivities(
+                        context, activities, uh.getIdentifier());
+                ichthysRemoved = activities.size() != unblockedCount;
+                beforePrefCount = activities.size();
                 if (mIsTagAppPrefSupported) {
                     activities = checkPrefList(activities, uh.getIdentifier());
+                }
+                if (ichthysRemoved && activities.size() == beforePrefCount) {
+                    pinIchthysLaunch(activities);
                 }
                 if (activities.size() > 0) {
                     if (DBG) Log.d(TAG, "tryStartActivity: other user");
@@ -659,6 +703,12 @@ class NfcDispatcher {
             overrideTechLists = mOverrideTechLists;
             provisioningOnly = mProvisioningOnly;
             provisioningMimes = mProvisioningMimes;
+            // IchthysOS: a foreground dispatch registered before the app was put on
+            // ichthys_nfc_blocked_pkgs no longer receives tags.
+            if (overrideIntent != null
+                    && IchthysNfcPolicy.isUidBlocked(mContext, mForegroundUid)) {
+                overrideIntent = null;
+            }
         }
 
         boolean screenUnlocked = false;
@@ -962,6 +1012,11 @@ class NfcDispatcher {
                             + "Could not create user package context");
                     return false;
                 }
+                // IchthysOS: an AAR does not launch an app on ichthys_nfc_blocked_pkgs.
+                if (IchthysNfcPolicy.isPackageBlocked(mContext, firstPackage,
+                        uh.getIdentifier())) {
+                    continue;
+                }
                 Intent appLaunchIntent = pm.getLaunchIntentForPackage(firstPackage);
                 Tag tag = dispatch.tag;
                 appLaunchIntent.putExtra(NfcAdapter.EXTRA_TAG, tag);
@@ -1146,7 +1201,11 @@ class NfcDispatcher {
                     // SecurityExceptions.
                     if (!matches.contains(info.resolveInfo)
                             && info.resolveInfo.activityInfo.exported
-                            && isMatchAdditionalActivityFilters(info.resolveInfo)) {
+                            && isMatchAdditionalActivityFilters(info.resolveInfo)
+                            // IchthysOS: apps on ichthys_nfc_blocked_pkgs get no tags.
+                            && !IchthysNfcPolicy.isPackageBlocked(mContext,
+                                    info.resolveInfo.activityInfo.packageName,
+                                    uh.getIdentifier())) {
                         if (!mIsTagAppPrefSupported) {
                             matches.add(info.resolveInfo);
                         } else {

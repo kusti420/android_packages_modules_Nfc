@@ -27,12 +27,14 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageManager.ResolveInfoFlags;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
+import android.database.ContentObserver;
 import android.nfc.cardemulation.HostNfcFService;
 import android.nfc.cardemulation.NfcFCardEmulation;
 import android.nfc.cardemulation.NfcFServiceInfo;
 import android.os.ParcelFileDescriptor;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.provider.Settings;
 import android.sysprop.NfcProperties;
 import android.util.AtomicFile;
 import android.util.Log;
@@ -43,6 +45,7 @@ import android.util.proto.ProtoOutputStream;
 import androidx.annotation.VisibleForTesting;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.nfc.IchthysNfcPolicy;
 import com.android.nfc.Utils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -207,6 +210,23 @@ public class RegisteredNfcFServicesCache {
         sdFilter.addAction(Intent.ACTION_EXTERNAL_APPLICATIONS_UNAVAILABLE);
         mContext.registerReceiverForAllUsers(mReceiver.get(), sdFilter, null, null);
 
+        // IchthysOS: re-validate services when the per-app NFC block list changes.
+        mContext.getContentResolver().registerContentObserverAsUser(
+                Settings.Secure.getUriFor(IchthysNfcPolicy.BLOCKED_PACKAGES_SETTING), false,
+                new ContentObserver(null) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        synchronized (mLock) {
+                            if (mUserHandles == null) {
+                                return;
+                            }
+                            for (UserHandle uh : mUserHandles) {
+                                invalidateCache(uh.getIdentifier());
+                            }
+                        }
+                    }
+                }, UserHandle.ALL);
+
         File dataDir = mContext.getFilesDir();
         if (atomicFile == null) {
             mDynamicSystemCodeNfcid2File =
@@ -280,6 +300,12 @@ public class RegisteredNfcFServicesCache {
             try {
                 ServiceInfo si = resolvedService.serviceInfo;
                 ComponentName componentName = new ComponentName(si.packageName, si.name);
+                // IchthysOS: apps on ichthys_nfc_blocked_pkgs get no HCE-F either.
+                if (IchthysNfcPolicy.isPackageBlocked(mContext, si.packageName, userId)) {
+                    Log.i(TAG, "getInstalledServices: Skipping blocked NfcF service "
+                            + componentName);
+                    continue;
+                }
                 // Check if the package holds the NFC permission
                 if (pm.checkPermission(android.Manifest.permission.NFC, si.packageName) !=
                         PackageManager.PERMISSION_GRANTED) {
